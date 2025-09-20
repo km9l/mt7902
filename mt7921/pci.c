@@ -169,6 +169,7 @@ static u32 mt7921_rmw(struct mt76_dev *mdev, u32 offset, u32 mask, u32 val)
 
 static int mt7921_dma_init(struct mt792x_dev *dev)
 {
+	bool is_mt7902;
 	int ret;
 
 	mt76_dma_attach(&dev->mt76);
@@ -176,6 +177,8 @@ static int mt7921_dma_init(struct mt792x_dev *dev)
 	ret = mt792x_dma_disable(dev, true);
 	if (ret)
 		return ret;
+
+	is_mt7902 = mt76_chip(&dev->mt76) == 0x7902;
 
 	/* init tx queue */
 	ret = mt76_connac_init_tx_queues(dev->phy.mt76, MT7921_TXQ_BAND0,
@@ -187,8 +190,7 @@ static int mt7921_dma_init(struct mt792x_dev *dev)
 	mt76_wr(dev, MT_WFDMA0_TX_RING0_EXT_CTRL, 0x4);
 
 	/* command to WM */
-	ret = mt76_init_mcu_queue(&dev->mt76, MT_MCUQ_WM,
-				  mt76_chip(&dev->mt76) == 0x7902 ?
+	ret = mt76_init_mcu_queue(&dev->mt76, MT_MCUQ_WM, is_mt7902 ?
 				  MT7902_TXQ_MCU_WM : MT7921_TXQ_MCU_RM,
 				  MT7921_TX_MCU_RING_SIZE, MT_TX_RING_BASE);
 	if (ret)
@@ -203,16 +205,18 @@ static int mt7921_dma_init(struct mt792x_dev *dev)
 	/* event from WM before firmware download */
 	ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_MCU],
 			       MT7921_RXQ_MCU_WM,
+			       is_mt7902 ? MT7921_RX_MCU_WA_RING_SIZE :
 			       MT7921_RX_MCU_RING_SIZE,
 			       MT_RX_BUF_SIZE, MT_RX_EVENT_RING_BASE);
 	if (ret)
 		return ret;
 
 	/* Change mcu queue after firmware download */
-	ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_MCU_WA],
-			       MT7921_RXQ_MCU_WM,
-			       MT7921_RX_MCU_WA_RING_SIZE,
-			       MT_RX_BUF_SIZE, MT_WFDMA0(0x540));
+	if (!is_mt7902)
+		ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_MCU_WA],
+				       MT7921_RXQ_MCU_WM,
+				       MT7921_RX_MCU_WA_RING_SIZE,
+				       MT_RX_BUF_SIZE, MT_WFDMA0(0x540));
 	if (ret)
 		return ret;
 
@@ -274,6 +278,18 @@ static int mt7921_pci_probe(struct pci_dev *pdev,
 			.data_complete_mask = MT_INT_RX_DONE_DATA,
 			.wm_complete_mask = MT_INT_RX_DONE_WM,
 			.wm2_complete_mask = MT_INT_RX_DONE_WM2,
+		},
+	};
+	static const struct mt792x_irq_map mt7902_irq_map = {
+		.host_irq_enable = MT_WFDMA0_HOST_INT_ENA,
+		.tx = {
+			.all_complete_mask = MT_INT_TX_DONE_ALL,
+			.mcu_complete_mask = MT_INT_TX_DONE_MCU,
+		},
+		.rx = {
+			.data_complete_mask = MT_INT_RX_DONE_DATA,
+			.wm_complete_mask = MT_INT_RX_DONE_WM,
+			.wm2_complete_mask = 0,
 		},
 	};
 	struct ieee80211_ops *ops;
@@ -365,6 +381,9 @@ static int mt7921_pci_probe(struct pci_dev *pdev,
 	mdev->rev = (chipid << 16) |
 		    (mt7921_l1_rr(dev, MT_HW_REV) & 0xff);
 	dev_info(mdev->dev, "ASIC revision: %04x\n", mdev->rev);
+
+	if (chipid == 0x7902)
+		dev->irq_map = &mt7902_irq_map;
 
 	ret = mt792x_wfsys_reset(dev);
 	if (ret)
